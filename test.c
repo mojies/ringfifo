@@ -27,9 +27,11 @@ void *send_pthread( void* pdata ){
         if( ( ret = read( fd, buf, 480 ) ) <= 0 ){
             break;
         }
+        // printf("%d:", ret);
         // DLLOGW( "read -> %d", ret );
-        ringfifo_api_put( ringfifo, buf, ret );
-        usleep( 1000 );
+         // ringfifo_api_put( ringfifo, buf, ret );
+        usleep( 100 );
+        ringfifo_api_put_block( ringfifo, buf, ret );
     }
 }
 
@@ -44,7 +46,7 @@ void *recv_pthread( void* pdata ){
     user_index = ringfifo_api_user_add( ringfifo );
     // DLLOGW("user index -> %d", user_index);
     while(1){
-        ret = ringfifo_api_get( ringfifo, user_index, buf, 3200 );
+        ret = ringfifo_api_get( ringfifo, user_index, buf, 3100 );
         write( fd, buf, ret );
     }
 }

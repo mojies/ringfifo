@@ -5,7 +5,7 @@ SRCS += ringfifo.c
 SRCS += test.c
 
 
-CFLAGS += 
+CFLAGS += -O2
 
 LDFLAGS += -lpthread
 

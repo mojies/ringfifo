@@ -17,8 +17,10 @@ typedef struct{
 
 typedef struct {
     pthread_mutex_t     a_mutex;
-    pthread_cond_t      a_cond;
-    pthread_mutex_t     a_cond_mutex;
+    pthread_cond_t      a_rcond;
+    pthread_mutex_t     a_rcond_mutex;
+    pthread_cond_t      a_wcond;
+    pthread_mutex_t     a_wcond_mutex;
     rd_t               *a_buf;
     int                 a_maxlen;
     int                 a_len;
@@ -51,8 +53,10 @@ void *ringfifo_api_create( int ilen, int inmbs ){
         tp_ring->a_user[ i ] = NULL;
     */
     pthread_mutex_init( &tp_ring->a_mutex, NULL );
-    pthread_cond_init( &tp_ring->a_cond, NULL );
-    pthread_mutex_init( &tp_ring->a_cond_mutex, NULL );
+    pthread_cond_init( &tp_ring->a_rcond, NULL );
+    pthread_mutex_init( &tp_ring->a_rcond_mutex, NULL );
+    pthread_cond_init( &tp_ring->a_wcond, NULL );
+    pthread_mutex_init( &tp_ring->a_wcond_mutex, NULL );
 
     return tp_ring;
 gt_ring_buf_init_freebuf:
@@ -70,8 +74,11 @@ int ringfifo_api_destroy( void  *iring ){
     pthread_mutex_lock( &tp_ring->a_mutex );
     pthread_mutex_unlock( &tp_ring->a_mutex );
     pthread_mutex_destroy( &tp_ring->a_mutex );
-    pthread_cond_destroy( &tp_ring->a_cond );
-    pthread_mutex_destroy( &tp_ring->a_cond_mutex );
+    pthread_cond_destroy( &tp_ring->a_rcond );
+    pthread_mutex_destroy( &tp_ring->a_rcond_mutex );
+    pthread_cond_destroy( &tp_ring->a_wcond );
+    pthread_mutex_destroy( &tp_ring->a_wcond_mutex );
+
     for( i = 0; i < tp_ring->a_unmbs; i++ )
         if( tp_ring->a_user[ i ] )
             free( tp_ring->a_user[i] );
@@ -147,29 +154,28 @@ int ringfifo_api_user_del( void  *iring, int iindex ){
     return 0;
 }
 
-
-
-int ringfifo_api_put( void  *iring, rd_t *ibuf, int ilen ){
-    m_ring     *tp_ring = iring;
-    m_ring_user    *tp_user;
+int ringfifo_api_put( void  *iring, rd_t *ibuf, int iplen ){
+    m_ring          *tp_ring = iring;
+    m_ring_user     *tp_user;
     int              i;
 
     if( tp_ring->a_buf == NULL ) return -1;
     if( ibuf == NULL ) return -1;
-    if( ilen > tp_ring->a_maxlen ) return -1;
+    if( ( iplen > tp_ring->a_maxlen )\
+     || ( iplen == 0 ) ) return -1;
 
     pthread_mutex_lock( &tp_ring->a_mutex );
     // is the ilde space enough
 #if RINGFIFO_DEBUG
     DLLOGD( "ring put : ilde space 1-> %d", tp_ring->a_maxlen - tp_ring->a_len  );
 #endif
-    if( ilen > ( tp_ring->a_maxlen - tp_ring->a_len ) ){
+    if( iplen > ( tp_ring->a_maxlen - tp_ring->a_len ) ){
         // free space
-        tp_ring->a_tail = tp_ring->a_head + ilen;
+        tp_ring->a_tail = tp_ring->a_head + iplen;
         if( tp_ring->a_tail >= tp_ring->a_maxlen )
             tp_ring->a_tail -= tp_ring->a_maxlen;
         // clear user old data
-        for( i = 0; i < tp_ring->a_unmbs; i++ ){
+        for( i = 0; i < tp_ring->a_unmbs; i++ )
             if( tp_ring->a_user[ i ] ){
                 tp_user = tp_ring->a_user[ i ];
                 if( tp_ring->a_head > tp_ring->a_tail )
@@ -184,66 +190,73 @@ int ringfifo_api_put( void  *iring, rd_t *ibuf, int ilen ){
                      || ( ( tp_user->a_point == tp_ring->a_head )\
                        && ( tp_user->a_len > tp_ring->a_maxlen/2 ) ) )
                         tp_user->a_point = tp_ring->a_tail;
-                if( tp_ring->a_head >= tp_user->a_point ){
-#if RINGFIFO_DEBUG
-                    DLLOGW( "POS1 : %d lossing %d", \
-                            tp_user->a_index,\
-                            tp_user->a_len - tp_ring->a_head + tp_user->a_point );
-#endif
+                if( tp_ring->a_head >= tp_user->a_point )
                     tp_user->a_len = tp_ring->a_head - tp_user->a_point;
-                }else{
-#if RINGFIFO_DEBUG
-                    DLLOGW( "POS2 : %d lossing %d", \
-                            tp_user->a_index,\
-                            tp_user->a_len - tp_ring->a_maxlen + tp_user->a_point - tp_ring->a_head );
-#endif
+                else
                     tp_user->a_len = tp_ring->a_maxlen - tp_user->a_point + tp_ring->a_head;
-                }
             }
-        }
-        tp_ring->a_len = tp_ring->a_maxlen - ilen;
+        tp_ring->a_len = tp_ring->a_maxlen - iplen;
     }
 #if RINGFIFO_DEBUG
-    // DLLOGD( "ring put : ilde space 2-> %d", tp_ring->a_maxlen - tp_ring->a_len  );
+    DLLOGD( "ring put : ilde space 2-> %d", tp_ring->a_maxlen - tp_ring->a_len  );
 #endif
 
-#if 1
     if( tp_ring->a_head < tp_ring->a_maxlen ){
-        unsigned cp_len = tp_ring->a_maxlen - tp_ring->a_head;
-        if( cp_len >= ilen  ){
-            memcpy( &tp_ring->a_buf[ tp_ring->a_head ], ibuf, ilen );
-            tp_ring->a_head += ilen;
-            if( tp_ring->a_head == tp_ring->a_maxlen )
+        unsigned cp_len = tp_ring->a_maxlen - tp_ring->a_head - 1;
+        if( cp_len >= iplen  ){
+            memcpy( &tp_ring->a_buf[ tp_ring->a_head ], ibuf, iplen );
+            tp_ring->a_head += iplen;
+            if( tp_ring->a_head >= tp_ring->a_maxlen )
                 tp_ring->a_head = 0;
-        }else if( cp_len < ilen ){
+        }else if( cp_len < iplen ){
             memcpy( &tp_ring->a_buf[ tp_ring->a_head ], ibuf, cp_len );
             i = cp_len;
-            cp_len = ilen - cp_len;
-            memcpy( &tp_ring->a_buf[ 0 ], &ibuf[ i ], cp_len );
+            cp_len = iplen - cp_len;
+            memcpy( tp_ring->a_buf, &ibuf[ i ], cp_len );
             tp_ring->a_head = cp_len;
         }
     }
-#else
-    for( i = 0; ( tp_ring->a_head < tp_ring->a_maxlen ) && ( i < ilen ); i++ )
-        tp_ring->a_buf[ tp_ring->a_head++ ] = ibuf[ i ];
-    if( i < ilen )
-        for( tp_ring->a_head = 0; i < ilen; i++ )
-            tp_ring->a_buf[ tp_ring->a_head++ ] = ibuf[ i ];
-    if( tp_ring->a_head == tp_ring->a_maxlen )
-        tp_ring->a_head = 0;
-#endif
-    tp_ring->a_len += ilen;
+    tp_ring->a_len += iplen;
     for( i = 0; i < tp_ring->a_unmbs; i++ )
         if( tp_ring->a_user[ i ] )
-            tp_ring->a_user[ i ]->a_len += ilen;
+            tp_ring->a_user[ i ]->a_len += iplen;
     pthread_mutex_unlock( &tp_ring->a_mutex );
-    // pthread_cond_signal( &tp_ring->a_cond );
-    pthread_cond_broadcast( &tp_ring->a_cond );
+    pthread_cond_broadcast( &tp_ring->a_rcond );
 
     return 0;
 }
 
+int ringfifo_api_put_block( void *iring, rd_t *ibuf, int ilen ){
+    m_ring     *tp_ring = iring;
+    m_ring_user    *tp_user;
+    int              i;
 
+    if( tp_ring->a_buf == NULL ) return -1;
+    if( ibuf == NULL ) return -1;
+    if( ( ilen > tp_ring->a_maxlen )\
+     || ( ilen == 0 ) ) return -1;
+
+    if( ilen > ( tp_ring->a_maxlen - tp_ring->a_len ) ){
+        int tv_bufindex = 0;
+        int tv_bufsend = tp_ring->a_maxlen - tp_ring->a_len;
+        if( ringfifo_api_put( iring, &ibuf[ tv_bufindex ], tv_bufsend ) < 0 )
+            return -1;
+        tv_bufindex = tv_bufsend;
+        tv_bufsend = ilen - tv_bufsend;
+        while( 1 ){
+            pthread_cond_wait( &tp_ring->a_wcond, &tp_ring->a_wcond_mutex );
+            if( tv_bufsend <= ( tp_ring->a_maxlen - tp_ring->a_len ) ){
+                 break;
+            }
+        }
+        if( ringfifo_api_put( iring, &ibuf[ tv_bufindex ], tv_bufsend ) < 0 )
+            return -1;
+    }else{
+        if( ringfifo_api_put( iring, ibuf, ilen ) )
+           return -1;
+    }
+    return 0;
+}
 
 int ringfifo_api_get( void  *iring, int iindex, rd_t *ibuf, int ilen ){
     m_ring         *tp_ring = iring;
@@ -267,28 +280,21 @@ int ringfifo_api_get( void  *iring, int iindex, rd_t *ibuf, int ilen ){
     pthread_mutex_unlock( &tp_ring->a_mutex );
     if( i == tp_ring->a_unmbs ) return -1;
 
-#if RINGFIFO_DEBUG
-    DLLOGD( "ring get : u %d", i );
-#endif
     while(1){
         if( ( tp_ring->a_user[ i ] == NULL ) ||\
                 ( tp_ring->a_user[ i ]->a_index != iindex ) ){
             return -1;
         }else if( tp_ring->a_user[ i ]->a_len >= ilen ){
-            // DLLOGD("usrlen : %d - %d", tp_ring->a_user[ i ]->a_len, tp_ring->a_user[ i ]->a_point );
             pthread_mutex_lock( &tp_ring->a_mutex );
             break;
         }
-        pthread_cond_wait( &tp_ring->a_cond, &tp_ring->a_cond_mutex );
+        pthread_cond_wait( &tp_ring->a_rcond, &tp_ring->a_rcond_mutex );
         // usleep(100000);
     }
     tp_user = tp_ring->a_user[ i ];
 
-    // copy data
-    // 
-#if 1
     if( tp_user->a_point < tp_ring->a_maxlen ){
-        unsigned cp_len = tp_ring->a_maxlen - tp_user->a_point;
+        unsigned cp_len = tp_ring->a_maxlen - tp_user->a_point - 1 ;
         if( cp_len >= ilen ){
             memcpy( ibuf, &tp_ring->a_buf[ tp_user->a_point ], ilen );
             tp_user->a_point += ilen;
@@ -302,15 +308,6 @@ int ringfifo_api_get( void  *iring, int iindex, rd_t *ibuf, int ilen ){
             tp_user->a_point = cp_len;
         }
     }
-#else
-    for( i = 0; ( tp_user->a_point < tp_ring->a_maxlen ) && ( i < ilen ); i++ )
-        ibuf[ i ] = tp_ring->a_buf[ tp_user->a_point++ ];
-    if( i < ilen )
-        for( tp_user->a_point = 0; i < ilen; i++ )
-            ibuf[ i ] = tp_ring->a_buf[ tp_user->a_point++ ];
-    if( tp_user->a_point >= tp_ring->a_maxlen )
-        tp_user->a_point = 0;
-#endif
 
     tp_user->a_len -= ilen;
     // if( tp_user->a_len < 0 ) tp_user->a_len = 0;
@@ -329,8 +326,9 @@ int ringfifo_api_get( void  *iring, int iindex, rd_t *ibuf, int ilen ){
         tp_ring->a_tail = tv_min_point;
         tp_ring->a_len = tv_max_len;
     }
-
+    pthread_cond_broadcast( &tp_ring->a_wcond );
     pthread_mutex_unlock( &tp_ring->a_mutex );
+
     return ilen;
 }
 
